@@ -1,244 +1,377 @@
 import math
-import operator
+
+# --- Constants ---
+# Token types
+NUMBER = 'NUMBER'
+OPERATOR = 'OPERATOR'
+PARENTHESIS = 'PARENTHESIS'
+IDENTIFIER = 'IDENTIFIER'
+EOF = 'EOF'  # End of File
+
+# --- BUG FIX: Define operator lists for main.py to use ---
+BASIC_OPERATORS = ['+', '-', '*', '/']
+FUNCTIONS = ['sqrt', 'sin', 'cos', 'tan', 'log', 'ln']
 
 
-# --- Public API ---
+# --- Token ---
+class TOKEN:
+    def __init__(self, type, value):
+        self.type = type
+        self.value = value
 
-def evaluate_expression(expression: str) -> str:
-    """
-    Evaluates a mathematical expression string and returns the result
-    as a formatted string.
+    def __repr__(self):
+        return f"TOKEN({self.type}, {repr(self.value)})"
 
-    This is the main public function for the calculator core.
-    """
-    try:
-        # 1. Tokenize: Break the string into meaningful pieces
-        tokens = _tokenize(expression)
 
-        # 2. Shunting-Yard: Convert infix tokens to postfix (RPN)
-        postfix_tokens = _shunting_yard(tokens)
+# --- Lexer (Tokenizer) ---
+# Takes a string ("5+3") and splits it into tokens ([TOKEN(NUMBER, 5), ...])
+class Lexer:
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+        self.current_char = self.text[self.pos] if self.pos < len(self.text) else None
 
-        # 3. RPN Evaluation: Calculate the result from postfix tokens
-        result = _evaluate_rpn(postfix_tokens)
+    def advance(self):
+        """Move the 'pos' pointer and update 'current_char'."""
+        self.pos += 1
+        self.current_char = self.text[self.pos] if self.pos < len(self.text) else None
 
-        # Format the result nicely (remove .0 from integers)
-        if result == int(result):
-            return str(int(result))
+    def skip_whitespace(self):
+        while self.current_char is not None and self.current_char.isspace():
+            self.advance()
+
+    def get_number(self):
+        """Return a (multi-digit) integer or float."""
+        result = ''
+        while self.current_char is not None and (self.current_char.isdigit() or self.current_char == '.'):
+            result += self.current_char
+            self.advance()
+        try:
+            return float(result) if '.' in result else int(result)
+        except ValueError:
+            raise LexerError(f"Invalid number format: {result}")
+
+    def get_identifier(self):
+        """Return an identifier (e.g., function name, constant)."""
+        result = ''
+        while self.current_char is not None and (self.current_char.isalnum() or self.current_char == '_'):
+            result += self.current_char
+            self.advance()
+        return result
+
+    def get_next_token(self):
+        """Lexical analyzer (also known as scanner or tokenizer)."""
+        while self.current_char is not None:
+            if self.current_char.isspace():
+                self.skip_whitespace()
+                continue
+
+            if self.current_char.isdigit():
+                return TOKEN(NUMBER, self.get_number())
+
+            if self.current_char.isalpha():
+                return TOKEN(IDENTIFIER, self.get_identifier())
+
+            # Check for ** BEFORE *
+            if self.current_char == '*':
+                if self.pos + 1 < len(self.text) and self.text[self.pos + 1] == '*':
+                    self.advance()  # Consume the first *
+                    self.advance()  # Consume the second *
+                    return TOKEN(OPERATOR, '**')
+                # It's just a regular multiplication
+                self.advance()
+                return TOKEN(OPERATOR, '*')
+
+            # Check for other operators or parentheses
+            if self.current_char in BASIC_OPERATORS:
+                op = self.current_char
+                self.advance()
+                return TOKEN(OPERATOR, op)
+
+            if self.current_char in ['(', ')']:
+                op = self.current_char
+                self.advance()
+                return TOKEN(PARENTHESIS, op)
+
+            raise LexerError(f"Invalid character: '{self.current_char}'")
+
+        return TOKEN(EOF, None)
+
+
+# --- Parser (Syntax Analyzer) ---
+class ASTNode:
+    pass
+
+
+class BinOp(ASTNode):
+    def __init__(self, left, op, right):
+        self.left = left
+        self.op = op
+        self.right = right
+
+
+class UnaryOp(ASTNode):
+    def __init__(self, op, operand):
+        self.op = op
+        self.operand = operand
+
+
+class FuncCall(ASTNode):
+    def __init__(self, func_name, argument):
+        self.func_name = func_name
+        self.argument = argument
+
+
+class Num(ASTNode):
+    def __init__(self, value):
+        self.value = value
+
+
+class Parser:
+    def __init__(self, lexer):
+        self.lexer = lexer
+        self.current_token = self.lexer.get_next_token()
+        self.operators = {
+            '+': 1, '-': 1,
+            '*': 2, '/': 2,
+            '**': 3  # Precedence for **
+        }
+
+    def eat(self, token_type, token_value=None):
+        if self.current_token.type == token_type and \
+                (token_value is None or self.current_token.value == token_value):
+            self.current_token = self.lexer.get_next_token()
         else:
-            # Round to a reasonable number of decimal places
-            return str(round(result, 10))
+            raise ParserError(f"Invalid syntax. Expected {token_type}" +
+                              (f" with value {token_value}" if token_value else "") +
+                              f", got {self.current_token}")
 
-    except (ValueError, ZeroDivisionError, TypeError) as e:
-        # Catch all math-related errors and return an error message
-        return f"Error: {str(e)}"
+    def factor(self):
+        """
+        factor : (PLUS | MINUS) factor | NUMBER | LPAREN expr RPAREN | IDENTIFIER (LPAREN expr RPAREN)?
+        """
+        token = self.current_token
+
+        if token.type == OPERATOR and token.value == '+':
+            self.eat(OPERATOR, '+')
+            return UnaryOp('+', self.factor())
+        elif token.type == OPERATOR and token.value == '-':
+            self.eat(OPERATOR, '-')
+            return UnaryOp('-', self.factor())
+
+        if token.type == NUMBER:
+            self.eat(NUMBER)
+            return Num(token.value)
+
+        if token.type == PARENTHESIS and token.value == '(':
+            self.eat(PARENTHESIS, '(')
+            node = self.expr()
+            self.eat(PARENTHESIS, ')')
+            return node
+
+        if token.type == IDENTIFIER:
+            func_name = token.value
+            self.eat(IDENTIFIER)
+            if self.current_token.type == PARENTHESIS and self.current_token.value == '(':
+                # It's a function call
+                if func_name not in FUNCTIONS:
+                    raise ParserError(f"Unknown function: {func_name}")
+                self.eat(PARENTHESIS, '(')
+                argument = self.expr()
+                self.eat(PARENTHESIS, ')')
+                return FuncCall(func_name, argument)
+            else:
+                # It's a constant
+                if func_name == 'pi': return Num(math.pi)
+                if func_name == 'e': return Num(math.e)
+                raise ParserError(f"Unknown constant: {func_name}")
+
+        raise ParserError(f"Unexpected token: {token}")
+
+    def power(self):
+        """ Handles exponentiation (**). This is right-associative. """
+        node = self.factor()
+        if self.current_token.type == OPERATOR and self.current_token.value == '**':
+            token = self.current_token
+            self.eat(OPERATOR, '**')
+            node = BinOp(left=node, op=token.value, right=self.power())
+        return node
+
+    def term(self):
+        """ Handles * and / """
+        node = self.power()
+        while self.current_token.type == OPERATOR and self.current_token.value in ('*', '/'):
+            token = self.current_token
+            self.eat(OPERATOR, token.value)
+            node = BinOp(left=node, op=token.value, right=self.power())
+        return node
+
+    def expr(self):
+        """ Handles + and - """
+        node = self.term()
+        while self.current_token.type == OPERATOR and self.current_token.value in ('+', '-'):
+            token = self.current_token
+            self.eat(OPERATOR, token.value)
+            node = BinOp(left=node, op=token.value, right=self.term())
+        return node
+
+    def parse(self):
+        """Entry point for the parser."""
+        node = self.expr()
+        if self.current_token.type != EOF:
+            raise ParserError(f"Unexpected token after expression: {self.current_token}")
+        return node
+
+
+# --- Interpreter ---
+class Interpreter:
+    def __init__(self, parser):
+        self.parser = parser
+        self.functions = {
+            'sqrt': math.sqrt,
+            'sin': math.sin,
+            'cos': math.cos,
+            'tan': math.tan,
+            'log': math.log10,
+            'ln': math.log,
+        }
+
+    def visit(self, node):
+        method_name = f'visit_{type(node).__name__}'
+        visitor = getattr(self, method_name, self.generic_visit)
+        return visitor(node)
+
+    def generic_visit(self, node):
+        raise InterpreterError(f"No visit_{type(node).__name__} method")
+
+    def visit_Num(self, node):
+        return node.value
+
+    def visit_UnaryOp(self, node):
+        value = self.visit(node.operand)
+        if node.op == '+':
+            return +value
+        elif node.op == '-':
+            return -value
+
+    def visit_FuncCall(self, node):
+        func = self.functions.get(node.func_name)
+        if not func:
+            raise InterpreterError(f"Unknown function: {node.func_name}")
+
+        argument_val = self.visit(node.argument)
+
+        if node.func_name == 'sqrt' and argument_val < 0:
+            raise InterpreterError("Domain error: sqrt of negative number")
+        if node.func_name in ['log', 'ln'] and argument_val <= 0:
+            raise InterpreterError("Domain error: log of non-positive number")
+
+        return func(argument_val)
+
+    def visit_BinOp(self, node):
+        left_val = self.visit(node.left)
+        right_val = self.visit(node.right)
+
+        if node.op == '+':
+            return left_val + right_val
+        elif node.op == '-':
+            return left_val - right_val
+        elif node.op == '*':
+            return left_val * right_val
+        elif node.op == '/':
+            if right_val == 0:
+                raise InterpreterError("Division by zero")
+            return left_val / right_val
+        elif node.op == '**':
+            return left_val ** right_val
+
+    def interpret(self):
+        """Interpret the full expression and return the result."""
+        tree = self.parser.parse()
+        if tree is None:
+            return 0
+        return self.visit(tree)
+
+
+# --- Error Classes ---
+class LexerError(Exception):
+    pass
+
+
+class ParserError(Exception):
+    pass
+
+
+class InterpreterError(Exception):
+    pass
+
+
+# --- Main Evaluation Function ---
+def evaluate_expression(text: str) -> str:
+    """
+    High-level function to take a raw string,
+    run it through the full pipeline, and return a formatted result.
+    """
+    if not text:
+        return ""
+
+    try:
+        lexer = Lexer(text)
+        parser = Parser(lexer)
+        interpreter = Interpreter(parser)
+        result = interpreter.interpret()
+
+        if isinstance(result, (int, float)):
+            if result == int(result):
+                return str(int(result))
+            else:
+                return f"{result:.10g}"
+        return str(result)
+
+    except (LexerError, ParserError) as e:
+        print(f"Syntax Error: {e}")
+        return f"Error: {e}"  # Return the full error message
+    except (InterpreterError, ZeroDivisionError, ValueError) as e:
+        print(f"Runtime Error: {e}")
+        return f"Error: {e}"
     except Exception as e:
-        # Catch unexpected errors (like mismatched parentheses)
-        return f"Error: Malformed expression"
+        print(f"An unexpected error occurred: {e}")
+        return f"Error: {e}"
 
 
-# --- 1. Tokenizer ---
-
-def _tokenize(expression: str) -> list[str]:
-    """Converts the expression string into a list of tokens."""
-    tokens = []
-    current_token = ""
-
-    # Add whitespace around parentheses to make splitting easier
-    expression = expression.replace("(", " ( ").replace(")", " ) ")
-
-    # Handle implicit multiplication for parentheses, e.g., 5(3) -> 5*(3)
-    expression = expression.replace(")(", ") * (")
-    # e.g., 5sin(3) -> 5*sin(3)
-    for func in _FUNCTIONS.keys():
-        expression = expression.replace(f"{func}(", f"{func} (")
-        expression = expression.replace(f"){func}", f") * {func}")
-
-    lex_pass = expression.split()
-
-    for i, part in enumerate(lex_pass):
-        if _is_number(part):
-            # Handle implicit multiplication e.g., 5( or 5pi
-            if i > 0 and (lex_pass[i - 1] == ")" or lex_pass[i - 1] in _CONSTANTS):
-                tokens.append("*")
-            tokens.append(part)
-        elif part in _OPERATORS or part in _FUNCTIONS or part in _CONSTANTS or part in "()":
-            # Handle implicit multiplication e.g., pi( or (5)3
-            if part == "(" and i > 0 and (_is_number(lex_pass[i - 1]) or lex_pass[i - 1] == ")"):
-                tokens.append("*")
-
-            tokens.append(part)
-
-            if part == ")" and i + 1 < len(lex_pass) and _is_number(lex_pass[i + 1]):
-                tokens.append("*")
-        else:
-            raise ValueError(f"Unknown token: {part}")
-
-    return tokens
-
-
-# --- 2. Shunting-Yard Algorithm (Infix to Postfix) ---
-
-def _shunting_yard(tokens: list[str]) -> list[str]:
-    """Converts a token list from infix to postfix (RPN) notation."""
-    output_queue = []
-    operator_stack = []
-
-    for token in tokens:
-        if _is_number(token):
-            output_queue.append(token)
-        elif token in _CONSTANTS:
-            output_queue.append(token)
-        elif token in _FUNCTIONS:
-            operator_stack.append(token)
-        elif token in _OPERATORS:
-            # Handle operator precedence and associativity
-            while (operator_stack and
-                   operator_stack[-1] in _OPERATORS and
-                   _PRECEDENCE[operator_stack[-1]] >= _PRECEDENCE[token]):
-                output_queue.append(operator_stack.pop())
-            operator_stack.append(token)
-        elif token == "(":
-            operator_stack.append(token)
-        elif token == ")":
-            # Pop operators until a matching '(' is found
-            while operator_stack and operator_stack[-1] != "(":
-                output_queue.append(operator_stack.pop())
-            if not operator_stack or operator_stack[-1] != "(":
-                raise ValueError("Mismatched parentheses")
-            operator_stack.pop()  # Discard the '('
-
-            # If a function is at the top, move it to output
-            if operator_stack and operator_stack[-1] in _FUNCTIONS:
-                output_queue.append(operator_stack.pop())
-
-    # Pop remaining operators from the stack to the output
-    while operator_stack:
-        token = operator_stack.pop()
-        if token == "(":
-            raise ValueError("Mismatched parentheses")
-        output_queue.append(token)
-
-    return output_queue
-
-
-# --- 3. RPN Evaluator ---
-
-def _evaluate_rpn(tokens: list[str]) -> float:
-    """Evaluates a postfix (RPN) token list."""
-    stack = []
-
-    for token in tokens:
-        if _is_number(token):
-            stack.append(float(token))
-        elif token in _CONSTANTS:
-            stack.append(_CONSTANTS[token])
-        elif token in _FUNCTIONS:
-            if not stack:
-                raise ValueError(f"Not enough arguments for {token}")
-            # Functions take one argument
-            arg = stack.pop()
-            stack.append(_FUNCTIONS[token](arg))
-        elif token in _OPERATORS:
-            if len(stack) < 2:
-                raise ValueError(f"Not enough arguments for {token}")
-            # Operators take two arguments
-            num2 = stack.pop()
-            num1 = stack.pop()
-            stack.append(_OPERATORS[token](num1, num2))
-
-    if len(stack) != 1:
-        raise ValueError("Invalid expression")
-
-    return stack[0]
-
-
-# --- Helper Definitions ---
-
-def _is_number(s: str) -> bool:
-    """Checks if a string can be converted to a float."""
-    try:
-        float(s)
-        return True
-    except ValueError:
-        return False
-
-
-# Operator definitions
-_OPERATORS = {
-    "+": operator.add,
-    "-": operator.sub,
-    "*": operator.mul,
-    "/": operator.truediv,
-    "^": operator.pow,
-}
-
-# Operator precedence
-_PRECEDENCE = {
-    "+": 1,
-    "-": 1,
-    "*": 2,
-    "/": 2,
-    "^": 3,
-}
-
-# Function definitions (using Python's math module)
-_FUNCTIONS = {
-    "sin": math.sin,
-    "cos": math.cos,
-    "tan": math.tan,
-    "asin": math.asin,
-    "acos": math.acos,
-    "atan": math.atan,
-    "sqrt": math.sqrt,
-    "log": math.log10,  # log base 10
-    "ln": math.log,  # natural log (base e)
-    "rad": math.radians,  # convert degrees to radians
-    "deg": math.degrees,  # convert radians to degrees
-}
-
-# Constant definitions
-_CONSTANTS = {
-    "pi": math.pi,
-    "e": math.e,
-}
-
-# --- Test Harness (to run this file directly) ---
-
+# --- Main block for testing this file directly ---
 if __name__ == "__main__":
-    """
-    This block runs ONLY when you execute this file directly.
-    It's a great way to test that your code works.
-    """
-    print("--- Calculator Core Test ---")
+    print("--- KaCalc Core Unit Tests ---")
 
-    test_expressions = [
-        "5 + 3",
-        "5 * 3 + 2",
-        "5 * (3 + 2)",
-        "10 / 2 - 3",
-        "2^3",
-        "sqrt(9)",
-        "sin(rad(90))",
-        "pi * 2",
-        "5(3 + 1)",  # Implicit multiplication
-        "pi(2)",
-        "5sin(rad(90))",  # Implicit multiplication
-        "10 / 0",  # Error test
-        "5 +",  # Error test
-        "(5 + 3",  # Error test
-    ]
+    tests = {
+        "5+3": "8",  # Test no spaces
+        "5 + 3": "8",  # Test spaces
+        "10 - 2 * 3": "4",
+        "(10 - 2) * 3": "24",
+        "5 + -3": "2",
+        "sqrt(9)": "3",
+        "2 * sqrt(16) + 1": "9",
+        "2**3": "8",  # Test **
+        "2 + 3**2": "11",
+        "(2 + 3)**2": "25",
+        "10 / 0": "Error: Division by zero",
+        "sqrt(-4)": "Error: Domain error: sqrt of negative number",
+        "5 + (": "Error: Invalid syntax. Expected NUMBER, got EOF"
+    }
 
-    for expr in test_expressions:
+    for expr, expected in tests.items():
         result = evaluate_expression(expr)
-        print(f"Expr: '{expr}'  ->  Result: {result}")
+        status = "✅" if result == expected else "❌"
+        print(f"{status} Expr: '{expr}' -> Result: {result} (Expected: {expected})")
 
-    print("\n--- Interactive Test ---")
-    print("Enter 'exit' to quit.")
+    # Interactive loop
+    print("\nEnter expressions to test (or 'exit' to quit):")
     while True:
         try:
-            expression = input("Enter expression: ")
-            if expression.lower() == 'exit':
+            text = input("KaCalc> ")
+            if text.lower() == 'exit':
                 break
-            print("Result:", evaluate_expression(expression))
+            print(f"Result: {evaluate_expression(text)}")
         except EOFError:
             break
+
